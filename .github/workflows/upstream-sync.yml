@@ -1,0 +1,138 @@
+name: Check User Scanner upstream safely
+
+on:
+  schedule:
+    - cron: "31 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: user-scanner-upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPOSITORY: kaifcodec/user-scanner
+  SYNC_BRANCH: automation/user-scanner-upstream-sync
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      needed: ${{ steps.pending.outputs.needed }}
+      clean: ${{ steps.merge.outputs.clean }}
+      head_sha: ${{ steps.merge.outputs.head_sha }}
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream and existing sync branch
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "+refs/heads/main:refs/remotes/upstream/main"
+          git fetch --no-tags origin "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
+
+      - name: Determine whether synchronization is needed
+        id: pending
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork already contains upstream main." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream on a review branch
+        if: steps.pending.outputs.needed == 'true'
+        id: merge
+        run: |
+          git config user.name "user-scanner-upstream-bot"
+          git config user.email "user-scanner-upstream-bot@users.noreply.github.com"
+          git switch --force-create "$SYNC_BRANCH" HEAD
+          if git merge --no-edit --no-ff upstream/main; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            git push --force-with-lease origin "$SYNC_BRANCH"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+            git merge --abort
+          fi
+
+      - name: Stop on merge conflicts
+        if: steps.pending.outputs.needed == 'true' && steps.merge.outputs.clean != 'true'
+        run: |
+          echo "## Manual merge required" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/- `/' /tmp/conflicts.txt | sed 's/$/`/' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Create or update safety-review pull request
+        if: steps.pending.outputs.needed == 'true' && steps.merge.outputs.clean == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.pending.outputs.upstream_sha }}
+        run: |
+          pr=$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq '.[0].number // empty')
+          body=$(printf 'Synchronizes this fork with `kaifcodec/user-scanner@%s`.\n\nThe same workflow runs ruff, mypy, and pytest against this exact merge candidate. Email modules, loud-module classification, dependencies, network behavior, and result contracts still require human review. This workflow never auto-merges.\n\nMerge with a **merge commit**, not squash or rebase, to retain upstream ancestry.' "$UPSTREAM_SHA")
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "Synchronize User Scanner upstream" --body "$body"
+          else
+            gh pr create --base main --head "$SYNC_BRANCH" --title "Synchronize User Scanner upstream" --body "$body"
+          fi
+          echo "pr_url=$(gh pr view "$SYNC_BRANCH" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: synchronize
+    if: needs.synchronize.outputs.needed == 'true' && needs.synchronize.outputs.clean == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact merge candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.synchronize.outputs.head_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install project and quality gates
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[mcp]" pytest pytest-cov pytest-anyio "anyio[trio]" ruff==0.15.22 mypy types-colorama
+
+      - name: Record review-sensitive changes
+        run: |
+          git fetch --no-tags origin main
+          {
+            echo "## Review-sensitive upstream paths"
+            echo
+            git diff --name-only origin/main...HEAD -- user_scanner/email_scan user_scanner/core/helpers.py user_scanner/core/result.py pyproject.toml requirements.txt | sed 's/^/- `/' | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run ruff
+        run: ruff check .
+
+      - name: Run mypy
+        run: mypy user_scanner
+
+      - name: Run pytest
+        run: pytest -q
+
+      - name: Confirm manual merge boundary
+        run: |
+          echo "Validation passed. The pull request remains open for human safety review." >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate: ${{ needs.synchronize.outputs.pr_url }}" >> "$GITHUB_STEP_SUMMARY"
