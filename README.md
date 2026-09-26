@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-1.5.1-blueviolet?style=for-the-badge&logo=github" />
+  <img src="https://img.shields.io/badge/Version-1.5.2-blueviolet?style=for-the-badge&logo=github" />
   <img src="https://img.shields.io/github/issues/kaifcodec/user-scanner?style=for-the-badge&logo=github" />
   <img src="https://img.shields.io/badge/Tested%20on-Termux-black?style=for-the-badge&logo=termux" />
   <img src="https://img.shields.io/badge/Tested%20on-Windows-cyan?style=for-the-badge&logo=Windows" />
@@ -26,7 +26,7 @@
 
 A powerful **2-in-1 OSINT suite** engineered for deep **Email and Username Intelligence**.
 
-With **455+ total scan vectors**—including **175+ email-integrated sites** and **280+ username platforms**—you can map digital footprints, analyze target behavior, uncover interests, full metadata of usernames and verify account registrations in seconds.
+With **1080+ total scan vectors**—including **200+ email-integrated sites** and **880+ username platforms**—you can map digital footprints, analyze target behavior, uncover interests, full metadata of usernames and verify account registrations in seconds.
 
 ---
 
@@ -45,20 +45,32 @@ With **455+ total scan vectors**—including **175+ email-integrated sites** and
 ---
 
 <p align="center">
-  <a href="https://noimosiny.com/" target="_blank">
+  <a href="https://noimosiny.com/?utm_campaign=userscanner&utm_source=github" target="_blank">
     <img width="750" style="max-width: 100%; height: auto;" alt="banner-github" src="https://github.com/user-attachments/assets/05ca5b27-f9b4-4385-b0cf-768fbad05c39" />
   </a>
   <br>
   <em><strong>Comprehensive OSINT platform for professional investigators and analysts.</strong> Reverse email, phone number, and username search across 250+ modules. Automate your intelligence gathering with our powerful tools.</em>
   <br>
-  <a href="https://noimosiny.com/" target="_blank"><strong>Get Started →</strong></a>
+  <a href="https://noimosiny.com/?utm_campaign=userscanner&utm_source=github" target="_blank"><strong>Get Started →</strong></a>
+</p>
+
+---
+
+<p align="center">
+  <a href="https://goodfirstissues.org/?ref=user-scanner&utm_source=github&utm_medium=banner&utm_campaign=user-scanner" target="_blank">
+    <img width="750" style="max-width: 100%; height: auto;" alt="banner-github" src="https://github.com/user-attachments/assets/dafc6cbd-22e9-4294-a2c2-473f59f389bc" />
+  </a>
+  <br>
+  <em><strong>Find beginner-friendly open-source issues and make your first pull request today.</strong></em>
+  <br>
+  <a href="https://goodfirstissues.org/?ref=user-scanner&utm_source=github&utm_medium=banner&utm_campaign=user-scanner" target="_blank"><strong>Get Started →</strong></a>
 </p>
 
 ---
 
 ## ✨ Key Features
 
-- 🔎 **Deep Email & Username OSINT:** Look up email registrations and perform advanced username profiling across 455+ platforms.
+- 🔎 **Deep Email & Username OSINT:** Look up email registrations and perform advanced username profiling across 1080+ platforms.
 - 👤 **Rich Metadata Scraping:** Scrapes avatars, bio descriptions, follower counts, UID numbers, seller statuses, and account attributes.
 - 🔀 **Cross-Scan & Pivot Engine:** Mines handles, profile links, and exposed email addresses from initial scans, automatically pivoting across secondary target vectors.
 - 🤖 **Model Context Protocol (MCP) Server:** Native AI agent integration for Claude Desktop, Cursor, Antigravity, and LLMs to run autonomous OSINT scans and recursive pivots.
@@ -116,6 +128,7 @@ Scan a single username or email address across all available platform modules:
 ```bash
 user-scanner -u johndoe             # Single username scan
 user-scanner -e johndoe@gmail.com   # Single email scan
+user-scanner -u johndoe --email-domains global  # Try johndoe across provider domains
 ```
 
 ### 2. Cross-Scan & Pivot Intelligence
@@ -259,7 +272,7 @@ asyncio.run(main())
 
 ## 💖 Support the Project
 
-Web platforms constantly update authentication flows. Maintaining over 455+ scan modules requires around-the-clock commitment to keep the suite reliable and free for the cybersecurity community.
+Web platforms constantly update authentication flows. Maintaining over 1080+ scan modules requires around-the-clock commitment to keep the suite reliable and free for the cybersecurity community.
 
 If `user-scanner` has saved you hours of manual pivoting or aided your investigations, consider supporting the project:
 
