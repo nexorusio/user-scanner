@@ -75,6 +75,25 @@ def test_request_reuses_warm_session(monkeypatch):
     assert urls == ["https://site/", "https://site/a", "https://site/graphql"]
 
 
+def test_each_origin_gets_its_own_warmup(monkeypatch):
+    _reset(monkeypatch)
+
+    impersonate.impersonate_validate(
+        "https://one.test/profile", _process, warmup_url="https://one.test/"
+    )
+    impersonate.impersonate_validate(
+        "https://two.test/profile", _process, warmup_url="https://two.test/"
+    )
+
+    urls = [call[0] for call in FakeSession.instances[0].calls]
+    assert urls == [
+        "https://one.test/",
+        "https://one.test/profile",
+        "https://two.test/",
+        "https://two.test/profile",
+    ]
+
+
 def test_exception_becomes_error_result(monkeypatch):
     _reset(monkeypatch)
 
@@ -87,3 +106,15 @@ def test_exception_becomes_error_result(monkeypatch):
 
     assert res.status == Status.ERROR
     assert res.url == "SHOWN"
+
+
+def test_get_warm_session_and_timeout(monkeypatch):
+    _reset(monkeypatch)
+
+    session = impersonate.get_warm_session(warmup_url="https://site/")
+    assert session is not None
+    assert len(FakeSession.instances) == 1
+    assert FakeSession.instances[0].calls[0][0] == "https://site/"
+
+    timeout = impersonate.get_impersonate_timeout()
+    assert timeout == impersonate.DEFAULT_TIMEOUT

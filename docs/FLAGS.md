@@ -17,17 +17,20 @@
 | `-c, --category CATEGORY`   | Scan all platforms in a specific category (comma-separated for multiple); also narrows `--cross-scan` |
 | `-lu, --list-user`          | List all available modules for username scanning            |
 | `-le, --list-email`         | List all available modules for email scanning               |
+| `--list-email-domains`      | List available email provider domain scopes                 |
+| `--email-domains SCOPES`    | With username input, generate emails from named provider scopes such as `global,canada`, `usa`, or `all` and scan email modules |
 | `-v, --verbose`             | Enable verbose output to show urls of the websites          |
 | `--all`                     | Show all results including Not Found/Not Registered/Error/Skipped |
 | `-m, --module MODULE`       | Scan a specific module (comma-separated for multiple); also narrows `--cross-scan` |
 | `-p, --permute PERMUTE`     | Generate username permutations using a pattern/suffix       |
-| `-P, --proxy-file FILE`     | Use proxies from file (one per line)                        |
+| `-P, --proxy-file FILE`     | Use proxies from file (one per line). Tip: Combine with `--no-pdf-media` to save proxy bandwidth |
 | `--validate-proxies`        | Validate proxies before scanning (tests against google.com) |
 | `-s, --stop STOP`           | Limit the number of permutations generated                  |
 | `-d, --delay DELAY`         | Delay (in seconds) between requests                         |
 | `-t, --timeout TIMEOUT`     | Override default request timeout in seconds                 |
-| `-C, --concurrency CONC`    | Override default concurrency limit                          |
+| `-C, --concurrency CONC`    | Override default concurrency limit (must be at least 1)     |
 | `-f, --format {csv,json,pdf}`| Select output format                                       |
+| `--no-pdf-media`            | Disable profile photo media fetching in PDF reports (conserves bandwidth on metered proxies) |
 | `-o, --output OUTPUT`       | Save results to a file (Can be used directly without `-f`)  |
 | `-U, --update`              | Update the tool to the latest version                       |
 | `--version`                 | Print the current version                                   |

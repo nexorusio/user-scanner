@@ -41,6 +41,32 @@ _DEFAULT_EMAIL_CONCURRENCY = 25
 _scan_lock = asyncio.Lock()
 
 
+async def _run_in_thread(func: Any, *args: Any) -> Any:
+    """Run a synchronous callable in a thread, shielding execution from cancellation.
+
+    If the calling asyncio task is cancelled while the thread is running,
+    this awaits the thread to completion before propagating CancelledError.
+    This guarantees that the thread finishes while context managers
+    (stdout redirection) and scan settings (proxies, locks) remain active.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(None, func, *args)
+    cancelled = False
+    while True:
+        try:
+            res = await asyncio.shield(fut)
+            if cancelled:
+                raise asyncio.CancelledError()
+            return res
+        except asyncio.CancelledError:
+            cancelled = True
+            task = asyncio.current_task()
+            if task and hasattr(task, "uncancel"):
+                task.uncancel()
+            if fut.done():
+                raise
+
+
 async def execute_scan(arguments: dict, is_email: bool) -> list[types.TextContent]:
     target_key = "email" if is_email else "username"
     target = arguments.get(target_key)
@@ -64,6 +90,14 @@ async def execute_scan(arguments: dict, is_email: bool) -> list[types.TextConten
 
     if category and module_name:
         raise ValueError("Cannot specify both 'category' and 'module'. Choose one.")
+
+    if concurrency is not None:
+        try:
+            conc_val = int(concurrency)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid concurrency value: {concurrency}") from e
+        if conc_val < 1:
+            raise ValueError(f"Concurrency must be at least 1, got {concurrency}")
 
     # Normalise module name the same way the CLI does (__main__.py:518)
     if module_name:
@@ -97,7 +131,7 @@ async def execute_scan(arguments: dict, is_email: bool) -> list[types.TextConten
             # Redirect stdout to stderr so orchestrator print() calls
             # don't corrupt the JSON-RPC stdio stream
             with contextlib.redirect_stdout(sys.stderr):
-                results = await asyncio.to_thread(
+                results = await _run_in_thread(
                     _run_scan, target, config, is_email, category, module_name
                 )
 
@@ -113,7 +147,9 @@ async def execute_scan(arguments: dict, is_email: bool) -> list[types.TextConten
                         modules=(module_name,) if module_name else (),
                         categories=(category,) if category else (),
                     )
-                    cross_results = run_cross_scan(results, config, cross_configs)
+                    cross_results = await _run_in_thread(
+                        run_cross_scan, results, config, cross_configs
+                    )
                     results.extend(cross_results)
         finally:
             # Restore defaults so the next request starts clean
