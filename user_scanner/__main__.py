@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import os
+import tempfile
 import time
 
 from colorama import Fore, Style
@@ -9,6 +10,7 @@ from itertools import islice
 from dataclasses import replace
 
 from user_scanner.cli.banner import print_banner
+from user_scanner.cli.tips import print_loud_skip_tip, print_proxy_tip
 from user_scanner.core import formatter
 from user_scanner.core.cross_scan import (
     DEFAULT_DEPTH,
@@ -34,7 +36,10 @@ from user_scanner.core.helpers import (
     load_modules,
     set_proxy_manager,
     find_category,
+    EMAIL_DOMAIN_SCOPES,
+    parse_email_domain_scopes,
 )
+from user_scanner.core.output_path import export_path_for_target
 from user_scanner.core.orchestrator import (
     run_user_category,
     run_user_full,
@@ -46,7 +51,9 @@ from user_scanner.core.hudson import run_hudson_scan
 from user_scanner.utils.update import update_self
 from user_scanner.utils.updater_logic import check_for_updates
 from user_scanner.core.loud_prompt import check_loud_module_permission
+from user_scanner.core import limits
 from user_scanner.core.patterns import expand_patterns_random, count_patterns
+from user_scanner.core.terminal import strip_terminal_controls
 
 # Color configs
 R = Fore.RED
@@ -56,6 +63,19 @@ Y = Fore.YELLOW
 X = Fore.RESET
 
 MAX_PERMUTATIONS_LIMIT = 100
+
+
+def _arg_type(check):
+    """Wrap a ``limits`` check as an argparse ``type``, so a bad value is a usage error."""
+
+    def convert(text):
+        try:
+            return check(text)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(str(e)) from e
+
+    convert.__name__ = check.__name__.removeprefix("check_")
+    return convert
 
 
 def _csv_names(value) -> tuple:
@@ -109,6 +129,17 @@ def main():
     )
 
     parser.add_argument(
+        "--list-email-domains",
+        action="store_true",
+        help="List available email provider domain scopes",
+    )
+
+    parser.add_argument(
+        "--email-domains",
+        help="Generate emails from username input using named provider scopes (comma-separated)",
+    )
+
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -124,7 +155,7 @@ def main():
     parser.add_argument(
         "-s",
         "--stop",
-        type=int,
+        type=_arg_type(limits.check_stop),
         default=MAX_PERMUTATIONS_LIMIT,
         help="Limit permutations",
     )
@@ -132,19 +163,19 @@ def main():
     parser.add_argument(
         "-t",
         "--timeout",
-        type=float,
+        type=_arg_type(limits.check_timeout),
         help="Override default request timeout in seconds",
     )
 
     parser.add_argument(
         "-C",
         "--concurrency",
-        type=int,
-        help="Override default concurrency limit (default: 60 for username, 25 for email scan)",
+        type=_arg_type(limits.check_concurrency),
+        help="Override default concurrency limit (1 to 500, default: 60 for username, 25 for email scan)",
     )
 
     parser.add_argument(
-        "-d", "--delay", type=float, default=0, help="Delay between requests"
+        "-d", "--delay", type=_arg_type(limits.check_delay), default=0, help="Delay between requests"
     )
 
     parser.add_argument("-f", "--format", choices=["csv", "json", "pdf"], help="Output format")
@@ -152,7 +183,7 @@ def main():
     parser.add_argument(
         "--no-pdf-media",
         action="store_true",
-        help="Disable profile photo media fetching in PDF report generation",
+        help="Disable profile photo media fetching in PDF report generation (useful for metered proxies or saving bandwidth)",
     )
 
     parser.add_argument("-o", "--output", type=str, help="Output file path")
@@ -161,13 +192,13 @@ def main():
         "-P",
         "--proxy-file",
         type=str,
-        help="Path to proxy list file (one proxy per line)",
+        help="Path to proxy list file (one proxy per line). Tip: use --no-pdf-media to conserve bandwidth on metered proxies",
     )
 
     parser.add_argument(
         "--validate-proxies",
         action="store_true",
-        help="Validate proxies before scanning (tests against gstatic.com/generate_204)",
+        help="Check that proxies are reachable before scanning (HTTPS request to gstatic.com/generate_204; not a trust check)",
     )
 
     parser.add_argument(
@@ -210,21 +241,22 @@ def main():
 
     parser.add_argument(
         "--cross-depth",
-        type=int,
+        type=_arg_type(limits.check_cross_depth),
         default=DEFAULT_DEPTH,
         help="Rounds of link-following. Each round pivots off the accounts the previous "
-        f"one found, reaching handles only a chain of links names (default: {DEFAULT_DEPTH})",
+        f"one found, reaching handles only a chain of links names (default: {DEFAULT_DEPTH}, "
+        f"maximum: {limits.MAX_CROSS_DEPTH})",
     )
 
     parser.add_argument(
         "--cross-sweep",
-        type=int,
+        type=_arg_type(limits.check_cross_sweep),
         default=DEFAULT_SWEEP,
         metavar="N",
         help="Targets — usernames and addresses together — a cross-scan sweeps against "
         "every module of their kind, across all rounds. 0 disables sweeping, leaving only "
         "the sites a pivot named — fewer accounts, but no handle collisions "
-        f"(default: {DEFAULT_SWEEP})",
+        f"(default: {DEFAULT_SWEEP}, maximum: {limits.MAX_CROSS_SWEEP})",
     )
 
     parser.add_argument("-U", "--update", action="store_true", help="Update the tool")
@@ -260,6 +292,13 @@ def main():
         version, _ = load_local_version()
         print(f"user-scanner current version -> {G}{version}{X}")
         sys.exit(0)
+
+    if args.list_email_domains:
+        print(f"\n{Fore.CYAN}Email domain scopes:{Style.RESET_ALL}")
+        print("  - all: every scope below")
+        for scope, domains in sorted(EMAIL_DOMAIN_SCOPES.items()):
+            print(f"  - {scope}: {', '.join(domains)}")
+        return
 
     if args.list_user or args.list_email:
         categories = load_categories(args.list_email, args.no_nsfw)
@@ -339,6 +378,21 @@ def main():
                     print(f"  - {name}{loud}")
         return
 
+    if args.email_domains and (args.email or args.email_file):
+        print(f"{R}[✘] Error: --email-domains can only be used with username input.{X}")
+        sys.exit(1)
+
+    email_domains = ()
+    if args.email_domains:
+        try:
+            email_domains = parse_email_domain_scopes(args.email_domains)
+        except ValueError as e:
+            print(f"{R}[✘] Error: {e}{X}")
+            sys.exit(1)
+        if not email_domains:
+            print(f"{R}[✘] Error: --email-domains requires at least one scope.{X}")
+            sys.exit(1)
+
     if not (args.username or args.email or args.username_file or args.email_file):
         parser.print_help()
         return
@@ -372,16 +426,16 @@ def main():
                 working_proxies = validate_proxies(all_proxies)
 
                 if not working_proxies:
-                    print(f"{R}[✘] No working proxies found{X}")
+                    print(f"{R}[✘] No reachable proxies found{X}")
                     sys.exit(1)
 
                 print(
-                    f"{G}[+] Found {len(working_proxies)} working proxies out of {len(all_proxies)}{X}"
+                    f"{G}[+] Found {len(working_proxies)} reachable proxies out of {len(all_proxies)}{X}"
                 )
 
                 set_proxy_manager(proxies=working_proxies)
                 proxy_count = get_proxy_count()
-                print(f"{G}[+] Using {proxy_count} validated proxies{X}")
+                print(f"{G}[+] Using {proxy_count} reachable proxies{X}")
             else:
                 set_proxy_manager(args.proxy_file)
                 proxy_count = get_proxy_count()
@@ -444,7 +498,7 @@ def main():
             print(
                 f"{C}[+] Loaded {len(usernames)} {'username' if len(usernames) == 1 else 'usernames'} from {args.username_file}{X}"
             )
-            is_email = False
+            is_email = bool(email_domains)
             targets_found = usernames
         except FileNotFoundError:
             print(f"{R}[✘] Error: File not found: {args.username_file}{X}")
@@ -453,8 +507,8 @@ def main():
             print(f"{R}[✘] Error reading username file: {e}{X}")
             sys.exit(1)
     else:
-        is_email = args.email is not None
-        if is_email and not is_valid_email(args.email):
+        is_email = args.email is not None or bool(email_domains)
+        if args.email and not is_valid_email(args.email):
             print(R + "[✘] Error: Invalid email format." + X)
             sys.exit(1)
 
@@ -465,18 +519,37 @@ def main():
 
     targets = []
     for target_name in targets_found:
-        temp_targets = list(islice(expand_patterns_random(target_name), args.stop))
+        username_targets = list(islice(expand_patterns_random(target_name), args.stop))
+        temp_targets = username_targets
+        if email_domains:
+            temp_targets = [
+                f"{username}@{domain}"
+                for username in username_targets
+                for domain in email_domains
+            ]
         targets.extend(temp_targets)
-        if len(temp_targets) > 1:
+        if len(username_targets) > 1:
             total = count_patterns(target_name)
-            if total > len(temp_targets):
+            if total > len(username_targets):
                 print(
-                    C + f"[+] Scanning {len(temp_targets)} of {total} permutations" + Style.RESET_ALL
+                    C + f"[+] Scanning {len(username_targets)} of {total} permutations" + Style.RESET_ALL
                 )
             else:
                 print(
-                    C + f"[+] Scanning {len(temp_targets)} permutations" + Style.RESET_ALL
+                    C + f"[+] Scanning {len(username_targets)} permutations" + Style.RESET_ALL
                 )
+
+    if email_domains:
+        valid_targets = []
+        for target in targets:
+            if is_valid_email(target):
+                valid_targets.append(target)
+            else:
+                print(f"{Y}[!] Skipping invalid generated email: {target}{X}")
+        targets = valid_targets
+        if not targets:
+            print(f"{R}[✘] Error: No valid generated emails found.{X}")
+            sys.exit(1)
 
     results = []
     show_all = args.all
@@ -549,10 +622,11 @@ def main():
         if i != 0 and args.delay:
             time.sleep(args.delay)
 
+        shown_target = strip_terminal_controls(target)
         if is_email:
-            print(f"\n{Fore.CYAN} Checking email: {target}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN} Checking email: {shown_target}{Style.RESET_ALL}")
         else:
-            print(f"\n{Fore.CYAN} Checking username: {target}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN} Checking username: {shown_target}{Style.RESET_ALL}")
 
 
         if args.hudson_scan:
@@ -629,8 +703,6 @@ def main():
         default_ext = args.format if args.format else "pdf"
         if is_pdf_export:
             default_ext = "pdf"
-            
-        output_path = args.output or f"{targets_found[0] if targets_found else 'target'}_report.{default_ext}"
 
         target_to_results = {}
         for r in results:
@@ -642,16 +714,22 @@ def main():
             if t not in target_to_results:
                 target_to_results[t] = []
             target_to_results[t].append(r)
-            
-        for t, t_results in target_to_results.items():
-            if len(target_to_results) > 1:
-                if args.output:
-                    base, ext = os.path.splitext(args.output)
-                    t_output = f"{base}_{t}{ext}"
-                else:
-                    t_output = f"{t}_report.{default_ext}"
-            else:
-                t_output = output_path
+
+        multiple_targets = len(target_to_results) > 1
+        for index, (t, t_results) in enumerate(target_to_results.items(), start=1):
+            try:
+                t_output = os.fspath(
+                    export_path_for_target(
+                        requested=args.output,
+                        target=str(t),
+                        index=index,
+                        multiple=multiple_targets,
+                        default_ext=default_ext,
+                    )
+                )
+            except ValueError as e:
+                print(f"\n{R}[✘] {e}{X}")
+                continue
 
             if is_pdf_export:
                 version_str, _ = load_local_version()
@@ -683,24 +761,45 @@ def main():
                 if os.path.exists(t_output):
                     try:
                         with open(t_output, "r", encoding="utf-8") as f:
-                            old = json.load(f)
-                            if isinstance(old, list):
+                            content = f.read().strip()
+                            if content:
+                                old = json.loads(content)
+                                if not isinstance(old, list):
+                                    raise ValueError(
+                                        f"Expected JSON array, got {type(old).__name__}"
+                                    )
                                 data = old
-                    except (json.JSONDecodeError, Exception):
-                        pass
+                    except Exception as e:
+                        print(f"\n{R}[✘] Failed to append to existing JSON file at {t_output}: {e}{X}")
+                        continue
 
                 data.extend(new_items)
-                with open(t_output, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                print(G + f"\n[+] JSON Results saved to {t_output}" + Style.RESET_ALL)
+                try:
+                    dir_name = os.path.dirname(os.path.abspath(t_output))
+                    os.makedirs(dir_name, exist_ok=True)
+                    temp_file = tempfile.NamedTemporaryFile(
+                        "w", dir=dir_name, delete=False, encoding="utf-8"
+                    )
+                    try:
+                        with temp_file as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                        os.replace(temp_file.name, t_output)
+                    except Exception:
+                        if os.path.exists(temp_file.name):
+                            os.remove(temp_file.name)
+                        raise
+                    print(G + f"\n[+] JSON Results saved to {t_output}" + Style.RESET_ALL)
+                except Exception as e:
+                    print(f"\n{R}[✘] Failed to save JSON report to {t_output}: {e}{X}")
 
             elif args.format == "csv":
-                content_csv = formatter.into_csv(t_results)
                 try:
                     with open(t_output, "r", encoding="utf-8") as init_file:
                         has_content = init_file.read().strip() != ""
                 except Exception:
                     has_content = False
+
+                content_csv = formatter.into_csv(t_results, include_header=not has_content)
 
                 with open(t_output, "a", encoding="utf-8") as f:
                     if has_content:
@@ -716,10 +815,9 @@ def main():
         print(f"\n{R}[✘] No results found for the given target(s).{X}")
     else:
         print(f"\n{C}[i] Scan complete.\n  Total hits:{X} {total_found}")
-        if total_skipped > 0:
-            print(f"  {C}Skipped:{X} {total_skipped}")
-            print(f"  {Y}Reason for skip: Module(s) notify{X} (but only if target exists there) {Y}the target with password reset email(s){X}")
-            print(f"  {Y}Use {G}--allow-loud{X}{Y} to include those module(s) to be scanned{X}")
+        print_loud_skip_tip(total_skipped)
+
+    print_proxy_tip(results, has_proxy=bool(args.proxy_file))
 
 if __name__ == "__main__":
     main()

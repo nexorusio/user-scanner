@@ -21,6 +21,32 @@ def test_get_site_name():
     assert helpers.get_site_name(module("user_scanner.chess_com")) == "Chess.com"
 
 
+def test_parse_email_domain_scopes_dedupes_in_order(monkeypatch):
+    monkeypatch.setitem(helpers.EMAIL_DOMAIN_SCOPES, "test", ("gmail.com", "example.com"))
+
+    domains = helpers.parse_email_domain_scopes("global,test")
+
+    global_domains = helpers.EMAIL_DOMAIN_SCOPES["global"]
+    assert domains[: len(global_domains)] == global_domains
+    assert domains.count("gmail.com") == 1
+    assert domains[-1] == "example.com"
+
+
+def test_parse_email_domain_scopes_all():
+    assert helpers.parse_email_domain_scopes("all") == tuple(
+        dict.fromkeys(
+            domain
+            for domains in helpers.EMAIL_DOMAIN_SCOPES.values()
+            for domain in domains
+        )
+    )
+
+
+def test_parse_email_domain_scopes_rejects_unknown():
+    with pytest.raises(ValueError, match="Unknown email domain scope 'mars'"):
+        helpers.parse_email_domain_scopes("global,mars")
+
+
 @pytest.fixture
 def run_main(monkeypatch):
     def _run(args):
@@ -187,12 +213,64 @@ def test_bulk_usernames_skip_comments_blank_lines(tmp_path, run_main, capsys):
     assert exit_code == 0
 
 
+def test_username_email_domains_use_email_modules(run_main, capsys):
+    exit_code = run_main(["-u", "alice", "--email-domains", "usa", "-m", "github"])
+    out = capsys.readouterr().out
+
+    assert "Checking email: alice@comcast.net" in out
+    assert "Checking email: alice@verizon.net" in out
+    assert "Checking email: alice@att.net" in out
+    assert exit_code == 0
+
+
 def test_username_file_unreadable(tmp_path, run_main):
     username_file = tmp_path / "test_usernames.txt"
     username_file.write_text("user")
     username_file.chmod(0)
     code = run_main(["-uf", str(username_file), "-m", "github"])
     assert code == 1
+
+
+def test_cli_concurrency_positive_bound(run_main, capsys):
+    code_zero = run_main(["-u", "alice", "-C", "0", "-m", "github"])
+    assert code_zero == 2
+    err_zero = capsys.readouterr().err
+    assert "must be at least 1" in err_zero
+
+    code_neg = run_main(["-u", "alice", "--concurrency", "-5", "-m", "github"])
+    assert code_neg == 2
+    err_neg = capsys.readouterr().err
+    assert "must be at least 1" in err_neg
+
+
+@pytest.mark.parametrize(
+    "flag, value, message",
+    [
+        ("--stop", "0", "must be at least 1"),
+        ("--stop", "-3", "must be at least 1"),
+        ("--delay", "-1", "must be at least 0"),
+        ("--delay", "nan", "finite"),
+        ("--delay", "inf", "finite"),
+        ("--delay", "1e9", "at most"),
+        ("--timeout", "0", "greater than 0"),
+        ("--timeout", "-5", "greater than 0"),
+        ("--timeout", "nan", "finite"),
+        ("--timeout", "inf", "finite"),
+        ("--timeout", "99999", "at most"),
+        ("--cross-depth", "0", "must be at least 1"),
+        ("--cross-depth", "-2", "must be at least 1"),
+        ("--cross-sweep", "-1", "must be at least 0"),
+        ("--stop", "abc", "Invalid"),
+        ("--concurrency", "501", "must be at most 500"),
+        ("--concurrency", "1000000000000000000", "must be at most 500"),
+    ],
+)
+def test_cli_numeric_options_are_bounded(run_main, capsys, flag, value, message):
+    code = run_main(["-u", "alice", flag, value, "-m", "github"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert flag in err
+    assert message in err
 
 
 @patch("httpx.AsyncClient")
@@ -259,6 +337,42 @@ def test_validate_proxy_single_worker(mock_client):
     result = helpers.validate_proxies(proxies, max_workers=1)
 
     assert result == proxies
+
+
+def test_validate_proxy_rejects_proxy_that_cannot_tunnel_tls():
+    # Answers every plaintext request with a forged 204 but refuses CONNECT,
+    # so it cannot carry an HTTPS request end to end.
+    import socket
+    import threading
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    port = server.getsockname()[1]
+    requests: list[bytes] = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                data = conn.recv(4096)
+                requests.append(data)
+                if data.startswith(b"CONNECT"):
+                    conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                else:
+                    conn.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        result = helpers.validate_proxies([f"http://127.0.0.1:{port}"], timeout=2)
+    finally:
+        server.close()
+
+    assert result == []
+    assert requests and all(r.startswith(b"CONNECT") for r in requests)
 
 
 def test_proxy_manager_add_protocol(tmp_path):

@@ -8,6 +8,8 @@ User Scanner provides a powerful **Library Mode** via its core engine. This allo
 
 The engine automatically detects whether you are using a module from `email_scan` or `user_scan` by inspecting its path. It then adjusts the result labels (e.g., "Registered" vs "Found") automatically.
 
+`check`, `check_category`, and `check_all` apply the same safety policy as the CLI. A loud module — one that may email or notify the account — is skipped unless you pass `configs=ScanConfig(allow_loud=True)`. Pass `configs=ScanConfig(no_nsfw=True)` to leave adult modules out. `ScanConfig` lives in `user_scanner.core.helpers`.
+
 ### Email Scan Example
 ```python
 import asyncio
@@ -436,6 +438,6 @@ Every `Result` object returned by the engine supports the following methods:
 
 To format a **List** of results, use the `formatter`:
 - `into_json(results_list)`
-- `into_csv(results_list)`
+- `into_csv(results_list, include_header=True)` — pass `include_header=False` when appending to a CSV that already has a header, to avoid writing it twice.
 
 ---

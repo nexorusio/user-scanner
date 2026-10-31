@@ -20,7 +20,9 @@ from user_scanner.core.helpers import (
     load_modules,
     get_global_timeout,
 )
+from user_scanner.core import limits
 from user_scanner.core.result import Result
+from user_scanner.core.terminal import scanning_description
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 
 
@@ -28,6 +30,8 @@ MAX_CONCURRENT_REQUESTS = 60
 _shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(MAX_CONCURRENT_REQUESTS * 2, 250))
 
 def set_concurrency(val: int):
+    # Checked before the executor below is built from it
+    val = limits.check_concurrency(val)
     global MAX_CONCURRENT_REQUESTS, _shared_executor
     MAX_CONCURRENT_REQUESTS = val
     _shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(val * 2, 250))
@@ -84,13 +88,25 @@ async def _run_batch(
     configs: ScanConfig,
     printed_cats: Optional[Set] = None,
     cat_override: Optional[str] = None,
-    sem: Optional[asyncio.Semaphore] = None
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Result]:
+    if not modules:
+        return []
+
     if sem is None:
         sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-        
+
+    if printed_cats is None:
+        printed_cats = set()
+
     results = []
-    
+
+    category_map: Dict[str, List[ModuleType]] = {}
+    for module in modules:
+        cat = cat_override or find_category(module) or "Unknown"
+        display_cat = cat.capitalize()
+        category_map.setdefault(display_cat, []).append(module)
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -99,32 +115,52 @@ async def _run_batch(
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         transient=True,
     ) as progress:
-        task_id = progress.add_task(f"[cyan]Scanning {username}...", total=len(modules))
+        task_id = progress.add_task(scanning_description(username), total=len(modules))
 
         def on_start_cb(site: str):
-            progress.update(task_id, description=f"[cyan]Scanning {username}... ({site})")
+            progress.update(task_id, description=scanning_description(username, site))
 
-        tasks = []
-        for module in modules:
-            t = asyncio.create_task(
-                _async_worker(module, username, sem, configs, cat_override=cat_override, on_start=on_start_cb)
-            )
-            t.add_done_callback(lambda t: progress.advance(task_id))
-            tasks.append(t)
+        # 1. Pre-spawn all tasks for all categories (global concurrency)
+        spawned_category_tasks = []
+        for cat_name, cat_modules in category_map.items():
+            tasks = []
+            for module in cat_modules:
+                t = asyncio.create_task(
+                    _async_worker(
+                        module,
+                        username,
+                        sem,
+                        configs,
+                        cat_override=cat_name,
+                        on_start=on_start_cb,
+                    )
+                )
+                t.add_done_callback(lambda t: progress.advance(task_id))
+                tasks.append(t)
+            spawned_category_tasks.append((cat_name, tasks))
 
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            
-            actual_cat = result.category or "Unknown"
-            # Handle specific logic where skipping needs to happen early
-            if configs.show_all or result.is_visible(configs):
-                if printed_cats is not None and actual_cat not in printed_cats:
-                    print(f"\n{Fore.MAGENTA}== {actual_cat.upper()} SITES =={Style.RESET_ALL}")
-                    printed_cats.add(actual_cat)
-                    
-            result.show(configs)
-            results.append(result)
-        
+        # 2. Await tasks category by category to stream grouped output
+        for cat_name, tasks in spawned_category_tasks:
+            if not tasks:
+                continue
+
+            if configs.show_all:
+                if cat_name not in printed_cats:
+                    print(f"\n{Fore.MAGENTA}== {cat_name.upper()} SITES =={Style.RESET_ALL}")
+                    printed_cats.add(cat_name)
+
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+
+                if configs.show_all or result.is_visible(configs):
+                    cat = result.category or cat_name
+                    if cat not in printed_cats:
+                        print(f"\n{Fore.MAGENTA}== {cat.upper()} SITES =={Style.RESET_ALL}")
+                        printed_cats.add(cat)
+
+                result.show(configs)
+                results.append(result)
+
     return results
 
 
@@ -152,6 +188,7 @@ def run_user_category(
             username,
             configs,
             printed_cats=printed_cats,
+            cat_override=category_name,
         )
     )
 
@@ -181,10 +218,10 @@ async def _run_user_full_async(username: str, configs: ScanConfig) -> List[Resul
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         transient=True,
     ) as progress:
-        task_id = progress.add_task(f"[cyan]Scanning {username}...", total=total_tasks)
-        
+        task_id = progress.add_task(scanning_description(username), total=total_tasks)
+
         def on_start_cb(site: str):
-            progress.update(task_id, description=f"[cyan]Scanning {username}... ({site})")
+            progress.update(task_id, description=scanning_description(username, site))
             
         spawned_category_tasks = []
         for display_name, modules in category_modules:
@@ -202,17 +239,18 @@ async def _run_user_full_async(username: str, configs: ScanConfig) -> List[Resul
                 continue
                 
             if configs.show_all:
-                print(f"\n{Fore.MAGENTA}== {display_name.upper()} SITES =={Style.RESET_ALL}")
-                printed_cats.add(display_name)
+                if display_name not in printed_cats:
+                    print(f"\n{Fore.MAGENTA}== {display_name.upper()} SITES =={Style.RESET_ALL}")
+                    printed_cats.add(display_name)
                 
             for coro in asyncio.as_completed(tasks):
                 result = await coro
                 
                 if configs.show_all or result.is_visible(configs):
-                    display_name = result.category or "Unknown"
-                    if display_name not in printed_cats:
-                        print(f"\n{Fore.MAGENTA}== {display_name.upper()} SITES =={Style.RESET_ALL}")
-                        printed_cats.add(display_name)
+                    cat = result.category or display_name
+                    if cat not in printed_cats:
+                        print(f"\n{Fore.MAGENTA}== {cat.upper()} SITES =={Style.RESET_ALL}")
+                        printed_cats.add(cat)
                         
                 result.show(configs)
                 all_results.append(result)

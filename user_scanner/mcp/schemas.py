@@ -1,6 +1,8 @@
 import mcp.types as types
 from typing import Any
 
+from user_scanner.core import limits
+
 
 def get_tool_list() -> list[types.Tool]:
     """Provide the list of tools available from this server."""
@@ -37,16 +39,21 @@ def get_tool_list() -> list[types.Tool]:
         },
         "cross_depth": {
             "type": "integer",
+            "minimum": 1,
+            "maximum": limits.MAX_CROSS_DEPTH,
             "description": (
                 "How deep the recursive link-following should go. Default: 1. "
-                "Increase for deeper but slower investigations."
+                f"Maximum: {limits.MAX_CROSS_DEPTH}."
             ),
         },
         "cross_sweep": {
             "type": "integer",
+            "minimum": 0,
+            "maximum": limits.MAX_CROSS_SWEEP,
             "description": (
                 "How many targets the cross-scan should automatically sweep "
-                "against all modules. Default: 3. Set to 0 to only scan sites "
+                "against all modules. Default: 3. "
+                f"Maximum: {limits.MAX_CROSS_SWEEP}. Set to 0 to only scan sites "
                 "explicitly named in pivots (prevents handle collisions)."
             ),
         },
@@ -59,7 +66,8 @@ def get_tool_list() -> list[types.Tool]:
             "description": (
                 "Optional category to restrict the scan to (e.g. 'social', "
                 "'gaming', 'dev'). Use list_available_modules to see options. "
-                "Cannot be used with 'module'."
+                "An unknown category is rejected with an error that suggests "
+                "close matches. Cannot be used with 'module'."
             ),
         },
         "module": {
@@ -67,7 +75,8 @@ def get_tool_list() -> list[types.Tool]:
             "description": (
                 "Optional specific site/module to restrict the scan to "
                 "(e.g. 'github'). Use list_available_modules to see options. "
-                "Cannot be used with 'category'."
+                "An unknown module is rejected with an error that suggests "
+                "close matches. Cannot be used with 'category'."
             ),
         },
         "allow_loud": {
@@ -96,6 +105,8 @@ def get_tool_list() -> list[types.Tool]:
         },
         "timeout": {
             "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 3600,
             "description": (
                 "Override default request timeout in seconds. Useful if the "
                 "target sites are slow or you are using slow proxies."
@@ -103,9 +114,11 @@ def get_tool_list() -> list[types.Tool]:
         },
         "concurrency": {
             "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
             "description": (
                 "Override default concurrency limit (how many requests to "
-                "make in parallel)."
+                "make in parallel). Must be between 1 and 500."
             ),
         },
     }

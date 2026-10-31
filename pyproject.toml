@@ -4,8 +4,8 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "user-scanner"
-version = "1.5.1"
-description = "Check username availability across multiple popular platforms"
+version = "1.5.2.3"
+description = "Advanced OSINT suite for email and username reconnaissance with rich profile metadata and cross-scan analysis"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
@@ -24,7 +24,7 @@ requires-python = ">=3.10"
 keywords = ["osint", "email-osint", "username-osint", "python", "cli-tool", "cybersecurity", "threat-intelligence", "security"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "pytest-anyio", "anyio[trio]"]
+dev = ["pytest", "pytest-cov", "pytest-anyio", "anyio[trio]", "mcp>=1.2.0,<2"]
 pdf = ["reportlab>=4.0.0", "pillow>=10.0.0", "svglib>=1.5.0"]
 mcp = ["mcp>=1.2.0,<2"]
 

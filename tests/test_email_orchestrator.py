@@ -1,10 +1,134 @@
 def test_set_concurrency():
+    import pytest
     from user_scanner.core.email_orchestrator import set_concurrency
     import user_scanner.core.email_orchestrator as email_orchestrator
     
     original_max = email_orchestrator.MAX_CONCURRENT_REQUESTS
-    set_concurrency(5)
-    assert email_orchestrator.MAX_CONCURRENT_REQUESTS == 5
-    
-    # restore
-    set_concurrency(original_max)
+    try:
+        set_concurrency(5)
+        assert email_orchestrator.MAX_CONCURRENT_REQUESTS == 5
+
+        set_concurrency(1)
+        assert email_orchestrator.MAX_CONCURRENT_REQUESTS == 1
+
+        with pytest.raises(ValueError, match="Concurrency must be at least 1"):
+            set_concurrency(0)
+
+        with pytest.raises(ValueError, match="Concurrency must be at least 1"):
+            set_concurrency(-5)
+    finally:
+        set_concurrency(original_max)
+
+
+def test_run_email_batch_multiple_categories_grouped(capsys, monkeypatch):
+    import types
+    from user_scanner.core import email_orchestrator
+    from user_scanner.core.helpers import ScanConfig
+    from user_scanner.core.result import Result
+
+    mod1 = types.ModuleType("cat_a.site1")
+    mod1.__file__ = "/path/to/email_scan/cat_a/site1.py"
+
+    async def val1(e):
+        return Result.taken(username=e)
+
+    setattr(mod1, "validate_site1", val1)
+
+    mod2 = types.ModuleType("cat_b.site2")
+    mod2.__file__ = "/path/to/email_scan/cat_b/site2.py"
+
+    async def val2(e):
+        return Result.taken(username=e)
+
+    setattr(mod2, "validate_site2", val2)
+
+    mod3 = types.ModuleType("cat_a.site3")
+    mod3.__file__ = "/path/to/email_scan/cat_a/site3.py"
+
+    async def val3(e):
+        return Result.taken(username=e)
+
+    setattr(mod3, "validate_site3", val3)
+
+    monkeypatch.setattr(email_orchestrator, "find_category", lambda m: m.__name__.split(".")[0].capitalize())
+    monkeypatch.setattr(email_orchestrator, "get_site_name", lambda m: m.__name__.split(".")[-1].capitalize())
+
+    results = email_orchestrator.run_email_module_batch([mod1, mod2, mod3], "alice@example.com", ScanConfig(show_all=True))
+    assert len(results) == 3
+
+    out = capsys.readouterr().out
+    assert "== CAT_A SITES ==" in out
+    assert "== CAT_B SITES ==" in out
+
+    cat_a_pos = out.find("== CAT_A SITES ==")
+    cat_b_pos = out.find("== CAT_B SITES ==")
+    assert cat_a_pos != -1 and cat_b_pos != -1
+    assert cat_a_pos < cat_b_pos
+
+    site1_pos = out.find("Site1")
+    site2_pos = out.find("Site2")
+    site3_pos = out.find("Site3")
+
+    # Site1 and Site3 belong to Cat_a and must appear BEFORE Cat_b header
+    assert cat_a_pos < site1_pos < cat_b_pos
+    assert cat_a_pos < site3_pos < cat_b_pos
+    # Site2 belongs to Cat_b and must appear AFTER Cat_b header
+    assert site2_pos > cat_b_pos
+
+
+def test_set_concurrency_has_a_maximum():
+    import pytest
+    import user_scanner.core.email_orchestrator as email_orchestrator
+
+    original = email_orchestrator.MAX_CONCURRENT_REQUESTS
+    try:
+        email_orchestrator.set_concurrency(500)
+        assert email_orchestrator.MAX_CONCURRENT_REQUESTS == 500
+        for value in [501, 10**18, True]:
+            with pytest.raises(ValueError):
+                email_orchestrator.set_concurrency(value)
+        assert email_orchestrator.MAX_CONCURRENT_REQUESTS == 500
+    finally:
+        email_orchestrator.set_concurrency(original)
+
+
+def test_run_email_batch_passes_allow_loud_from_config_not_argv(monkeypatch):
+    import sys
+    import types
+    from user_scanner.core import email_orchestrator
+    from user_scanner.core.helpers import ScanConfig
+    from user_scanner.core.result import Result
+
+    seen = {}
+
+    async def val_async(e, allow_loud=False):
+        seen["async"] = allow_loud
+        return Result.taken(username=e)
+
+    def val_sync(e, allow_loud=False):
+        seen["sync"] = allow_loud
+        return Result.taken(username=e)
+
+    async def val_plain(e):
+        seen["plain"] = True
+        return Result.taken(username=e)
+
+    modules = []
+    for name, func in (("site1", val_async), ("site2", val_sync), ("site3", val_plain)):
+        mod = types.ModuleType(f"cat_a.{name}")
+        mod.__file__ = f"/path/to/email_scan/cat_a/{name}.py"
+        setattr(mod, f"validate_{name}", func)
+        modules.append(mod)
+
+    monkeypatch.setattr(email_orchestrator, "find_category", lambda m: "Cat_a")
+    monkeypatch.setattr(email_orchestrator, "get_site_name", lambda m: m.__name__.split(".")[-1].capitalize())
+
+    # The scan policy decides, whatever the host process was started with
+    monkeypatch.setattr(sys, "argv", ["host"])
+    email_orchestrator.run_email_module_batch(modules, "alice@example.com", ScanConfig(allow_loud=True))
+    assert seen == {"async": True, "sync": True, "plain": True}
+
+    seen.clear()
+    monkeypatch.setattr(sys, "argv", ["host", "--allow-loud"])
+    email_orchestrator.run_email_module_batch(modules, "alice@example.com", ScanConfig())
+    assert seen == {"async": False, "sync": False, "plain": True}
