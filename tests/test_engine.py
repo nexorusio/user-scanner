@@ -18,7 +18,8 @@ import pytest
 from types import ModuleType
 from user_scanner.core import engine
 from unittest.mock import Mock, AsyncMock, call
-from user_scanner.core.result import Result
+from user_scanner.core.helpers import ScanConfig
+from user_scanner.core.result import Result, Status
 
 
 @pytest.fixture
@@ -44,6 +45,13 @@ def patreon_stub():
 def medium_stub():
     module = ModuleType("medium")
     module.__file__ = "/some/path/user_scan/creator/medium.py"
+    return module
+
+
+@pytest.fixture
+def cups7_stub():
+    module = ModuleType("cups7")
+    module.__file__ = "/some/path/user_scan/social/cups7.py"
     return module
 
 
@@ -309,3 +317,115 @@ async def test_check_all_category_exception(monkeypatch):
         await engine.check_all("some_email")
 
     assert "Failed" in str(exc_info.value)
+
+
+def _loud_module():
+    module = ModuleType("netflix")
+    module.__file__ = "/some/path/email_scan/shopping/netflix.py"
+    module.validate_netflix = AsyncMock(return_value=Result.taken())
+    return module
+
+
+@pytest.mark.anyio
+async def test_loud_module_is_skipped_without_consent():
+    module = _loud_module()
+
+    result = await engine.check(module, "person@example.com")
+
+    assert result == Status.SKIPPED
+    module.validate_netflix.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_loud_module_runs_when_consent_is_explicit():
+    module = _loud_module()
+
+    result = await engine.check(module, "person@example.com", ScanConfig(allow_loud=True))
+
+    assert result == Status.TAKEN
+    module.validate_netflix.assert_awaited_once_with("person@example.com")
+
+
+@pytest.mark.anyio
+async def test_check_category_skips_loud_module_unless_allowed(monkeypatch):
+    module = _loud_module()
+    monkeypatch.setattr(engine, "load_categories", lambda is_email: {"shopping": "/fake"})
+    monkeypatch.setattr(engine, "load_modules", lambda path: [module])
+
+    skipped = await engine.check_category("shopping", "person@example.com")
+    assert skipped[0] == Status.SKIPPED
+    module.validate_netflix.assert_not_awaited()
+
+    module.validate_netflix.reset_mock()
+    taken = await engine.check_category(
+        "shopping", "person@example.com", configs=ScanConfig(allow_loud=True)
+    )
+    assert taken[0] == Status.TAKEN
+    module.validate_netflix.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_check_all_skips_loud_module_unless_allowed(monkeypatch):
+    module = _loud_module()
+    monkeypatch.setattr(engine, "load_categories", lambda is_email: {"shopping": "/fake"})
+    monkeypatch.setattr(engine, "load_modules", lambda path: [module])
+
+    skipped = await engine.check_all("person@example.com")
+    assert skipped[0] == Status.SKIPPED
+    module.validate_netflix.assert_not_awaited()
+
+    module.validate_netflix.reset_mock()
+    taken = await engine.check_all(
+        "person@example.com", configs=ScanConfig(allow_loud=True)
+    )
+    assert taken[0] == Status.TAKEN
+    module.validate_netflix.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_adult_module_is_skipped_when_no_nsfw_is_set():
+    module = ModuleType("redtube")
+    module.__file__ = "/some/path/email_scan/adult/redtube.py"
+    module.validate_redtube = AsyncMock(return_value=Result.taken())
+
+    result = await engine.check(module, "person@example.com", ScanConfig(no_nsfw=True))
+
+    assert result == Status.SKIPPED
+    module.validate_redtube.assert_not_awaited()
+
+
+# check — validator resolution fallback
+# A module whose validator cannot match its file stem (digit-leading names
+# such as cups7/validate_7cups, legacy names such as besoccer/validate_okcats)
+# resolves through the CLI in helpers.get_scan_func; library mode must too.
+@pytest.mark.anyio
+async def test_non_stem_validator_name_resolves(cups7_stub):
+    def validate_7cups(target):
+        return Result.taken(reason=f"checked {target}")
+
+    cups7_stub.validate_7cups = validate_7cups
+
+    result = await engine.check(cups7_stub, "alice")
+
+    assert result.status == Status.TAKEN
+    assert result.username == "alice"
+
+
+@pytest.mark.anyio
+async def test_non_stem_async_validator_resolves(cups7_stub):
+    async def validate_7cups(target):
+        return Result.available()
+
+    cups7_stub.validate_7cups = validate_7cups
+
+    result = await engine.check(cups7_stub, "alice")
+
+    assert result.status == Status.AVAILABLE
+
+
+@pytest.mark.anyio
+async def test_module_without_any_validator_still_errors(cups7_stub):
+    result = await engine.check(cups7_stub, "alice")
+
+    assert result.status == Status.ERROR
+    assert "not found" in result.get_reason()
