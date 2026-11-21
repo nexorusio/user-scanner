@@ -52,13 +52,88 @@ def test_run_checks_category_threaded(monkeypatch, tmp_path):
 
 
 def test_set_concurrency():
+    import pytest
     from user_scanner.core.orchestrator import set_concurrency
     import user_scanner.core.orchestrator as orchestrator
     
     original_max = orchestrator.MAX_CONCURRENT_REQUESTS
-    set_concurrency(10)
-    assert orchestrator.MAX_CONCURRENT_REQUESTS == 10
-    assert orchestrator._shared_executor._max_workers == max(10 * 2, 250)
-    
-    # restore
-    set_concurrency(original_max)
+    try:
+        set_concurrency(10)
+        assert orchestrator.MAX_CONCURRENT_REQUESTS == 10
+        assert orchestrator._shared_executor._max_workers == max(10 * 2, 250)
+
+        set_concurrency(1)
+        assert orchestrator.MAX_CONCURRENT_REQUESTS == 1
+
+        with pytest.raises(ValueError, match="Concurrency must be at least 1"):
+            set_concurrency(0)
+
+        with pytest.raises(ValueError, match="Concurrency must be at least 1"):
+            set_concurrency(-5)
+    finally:
+        set_concurrency(original_max)
+
+
+def test_run_batch_multiple_categories_grouped(capsys, monkeypatch):
+    mod1 = types.ModuleType("cat_a.site1")
+    mod1.__file__ = "/path/to/user_scan/cat_a/site1.py"
+    setattr(mod1, "validate_site1", lambda u: Result.taken(username=u))
+
+    mod2 = types.ModuleType("cat_b.site2")
+    mod2.__file__ = "/path/to/user_scan/cat_b/site2.py"
+    setattr(mod2, "validate_site2", lambda u: Result.taken(username=u))
+
+    mod3 = types.ModuleType("cat_a.site3")
+    mod3.__file__ = "/path/to/user_scan/cat_a/site3.py"
+    setattr(mod3, "validate_site3", lambda u: Result.taken(username=u))
+
+    monkeypatch.setattr(orchestrator, "find_category", lambda m: m.__name__.split(".")[0].capitalize())
+    monkeypatch.setattr(orchestrator, "get_site_name", lambda m: m.__name__.split(".")[-1].capitalize())
+
+    results = orchestrator.run_user_module([mod1, mod2, mod3], "alice", ScanConfig(show_all=True))
+    assert len(results) == 3
+
+    out = capsys.readouterr().out
+    assert "== CAT_A SITES ==" in out
+    assert "== CAT_B SITES ==" in out
+
+    cat_a_pos = out.find("== CAT_A SITES ==")
+    cat_b_pos = out.find("== CAT_B SITES ==")
+    assert cat_a_pos != -1 and cat_b_pos != -1
+    assert cat_a_pos < cat_b_pos
+
+    site1_pos = out.find("Site1")
+    site2_pos = out.find("Site2")
+    site3_pos = out.find("Site3")
+
+    # Site1 and Site3 belong to Cat_a and must appear BEFORE Cat_b header
+    assert cat_a_pos < site1_pos < cat_b_pos
+    assert cat_a_pos < site3_pos < cat_b_pos
+    # Site2 belongs to Cat_b and must appear AFTER Cat_b header
+    assert site2_pos > cat_b_pos
+
+
+def test_set_concurrency_rejects_huge_values_before_building_an_executor():
+    from unittest.mock import patch
+    import pytest
+    import user_scanner.core.orchestrator as orchestrator
+
+    before = (orchestrator.MAX_CONCURRENT_REQUESTS, orchestrator._shared_executor)
+    with patch("concurrent.futures.ThreadPoolExecutor") as pool:
+        for value in [501, 10**18, True, "501"]:
+            with pytest.raises(ValueError):
+                orchestrator.set_concurrency(value)
+        pool.assert_not_called()
+    assert (orchestrator.MAX_CONCURRENT_REQUESTS, orchestrator._shared_executor) == before
+
+
+def test_set_concurrency_accepts_the_maximum():
+    import user_scanner.core.orchestrator as orchestrator
+
+    original = orchestrator.MAX_CONCURRENT_REQUESTS
+    try:
+        orchestrator.set_concurrency(500)
+        assert orchestrator.MAX_CONCURRENT_REQUESTS == 500
+        assert orchestrator._shared_executor._max_workers == 1000
+    finally:
+        orchestrator.set_concurrency(original)
