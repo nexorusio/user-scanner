@@ -59,6 +59,19 @@ def impersonate_request(
     return session.request(method, url, **kwargs)
 
 
+def get_warm_session(
+    impersonate: str = DEFAULT_IMPERSONATE,
+    warmup_url: Optional[str] = None,
+) -> cffi.Session:
+    """Return the cached browser-impersonating session for the current proxy."""
+    return _get_warm_session(impersonate, get_proxy(), warmup_url)
+
+
+def get_impersonate_timeout() -> float:
+    """Return the effective timeout for impersonated requests."""
+    return _timeout()
+
+
 async def impersonate_request_async(
     url: str,
     method: Literal["GET", "POST"] = "GET",
@@ -84,6 +97,7 @@ def _get_warm_session(
     impersonate: str, proxy: Optional[str], warmup_url: Optional[str]
 ) -> cffi.Session:
     key = (impersonate, proxy)
+    warmup_key = (*key, warmup_url)
     with _lock:
         session = _sessions.get(key)
         if session is None:
@@ -101,13 +115,13 @@ def _get_warm_session(
             key_lock = threading.Lock()
             _key_locks[key] = key_lock
 
-    if warmup_url and key not in _warmed:
+    if warmup_url and warmup_key not in _warmed:
         with key_lock:
-            if key not in _warmed:
+            if warmup_key not in _warmed:
                 # A blocked (403) warm-up still returns normally and sets the cookie;
                 # only a network error leaves the session unwarmed for a later retry.
                 session.get(warmup_url, timeout=_timeout())
-                _warmed.add(key)
+                _warmed.add(warmup_key)
 
     return session
 
